@@ -1,5 +1,7 @@
 // Opens a URL in the LG webOS TV's browser over the TV's local control API (SSAP).
-// Usage: node tv.js [url]
+// Usage: node tv.js            open the GitHub Pages copy (no Mac needed afterwards)
+//        node tv.js --local    open the copy served from this Mac on port 8080
+//        node tv.js <url>      open any URL
 // The first run shows a pairing prompt on the TV; accept it with the remote.
 const fs = require('fs');
 const path = require('path');
@@ -17,7 +19,9 @@ function lanAddress() {
   return 'localhost';
 }
 
-const url = process.argv[2] || `http://${lanAddress()}:8080/index.html`;
+const PAGES_URL = 'https://al-kheder.github.io/prayer-times-tv/';
+const arg = process.argv[2];
+const url = arg === '--local' ? `http://${lanAddress()}:8080/index.html` : arg || PAGES_URL;
 const savedKey = fs.existsSync(KEY_FILE) ? JSON.parse(fs.readFileSync(KEY_FILE, 'utf8'))['client-key'] : undefined;
 
 // Newer webOS firmware only accepts the secure socket on 3001, which uses a
