@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920, height=1080">
+<title>Prayer Times Berlin</title>
+<style>
+  :root {
+    --bg: #0b1320;
+    --panel: #121d30;
+    --line: #1f2d47;
+    --text: #e8edf5;
+    --muted: #8a9bb8;
+    --accent: #e0b062;
+    --accent-ink: #1a1206;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
+  body {
+    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    display: flex; flex-direction: column;
+    padding: 56px 80px;      /* TV overscan-safe margins */
+  }
+  header { display: flex; justify-content: space-between; align-items: flex-end; }
+  .clock { font-size: 150px; font-weight: 300; line-height: 1; letter-spacing: 2px; }
+  .clock .sec { font-size: 60px; color: var(--muted); }
+  .dates { text-align: right; }
+  .dates .greg { font-size: 44px; }
+  .dates .hijri { font-size: 38px; color: var(--accent); margin-top: 8px; }
+  .dates .city { font-size: 28px; color: var(--muted); margin-top: 8px; }
+
+  .next {
+    margin: 44px 0 36px; padding: 28px 40px;
+    background: var(--panel); border: 2px solid var(--line); border-radius: 20px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .next .label { font-size: 32px; color: var(--muted); }
+  .next .name { font-size: 64px; margin-top: 4px; }
+  .next .count { font-size: 96px; font-weight: 300; color: var(--accent); font-variant-numeric: tabular-nums; }
+
+  .grid { flex: 1; display: flex; gap: 24px; }
+  .card {
+    flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center;
+    background: var(--panel); border: 2px solid var(--line); border-radius: 20px;
+  }
+  .card .ar { font-size: 52px; }
+  .card .en { font-size: 30px; color: var(--muted); margin-top: 6px; }
+  .card .time { font-size: 76px; margin-top: 24px; font-variant-numeric: tabular-nums; }
+  .card.passed { opacity: .45; }
+  .card.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .card.active .en { color: var(--accent-ink); }
+  .card.sunrise .time { font-size: 60px; }
+
+  footer { margin-top: 24px; font-size: 22px; color: var(--muted); display: flex; justify-content: space-between; }
+  .error { color: #ff8a80; }
+
+  .azan {
+    display: none; position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+    background: rgba(11, 19, 32, .94);
+    flex-direction: column; justify-content: center; align-items: center;
+  }
+  .azan-title { font-size: 72px; color: var(--accent); }
+  .azan-name { font-size: 120px; margin-top: 24px; }
+  .azan-hint { font-size: 32px; color: var(--muted); margin-top: 48px; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="clock" id="clock">--:--<span class="sec"></span></div>
+    <div class="dates">
+      <div class="greg" id="greg"></div>
+      <div class="hijri" id="hijri" dir="rtl"></div>
+      <div class="city">Berlin</div>
+    </div>
+  </header>
+
+  <section class="next">
+    <div>
+      <div class="label">Next prayer</div>
+      <div class="name" id="nextName">—</div>
+    </div>
+    <div class="count" id="nextCount">--:--:--</div>
+  </section>
+
+  <section class="grid" id="grid"></section>
+
+  <footer>
+    <span id="method"></span>
+    <span id="azanStatus"></span>
+    <span id="status"></span>
+  </footer>
+
+  <div class="azan" id="azanOverlay">
+    <div class="azan-title">حان الآن موعد الأذان</div>
+    <div class="azan-name" id="azanName"></div>
+    <div class="azan-hint" id="azanHint"></div>
+  </div>
+
+<script>
+// Written in ES5 on purpose: the browser on older webOS TVs runs an old Chromium.
+var CONFIG = {
+  latitude: 52.52,
+  longitude: 13.405,
+  timezone: 'Europe/Berlin',
+  // Aladhan calculation method: 3 = Muslim World League, 13 = Diyanet (Turkey),
+  // 2 = ISNA. Pick the one your mosque uses; times differ by up to ~20 min.
+  method: 3,
+  azan: {
+    enabled: true,
+    url: 'https://www.islamcan.com/audio/adhan/azan1.mp3',
+    // Fajr's Azan adds "as-salatu khayrun min an-nawm"; point this at a Fajr recording.
+    fajrUrl: 'https://www.islamcan.com/audio/adhan/azan1.mp3',
+    volume: 1.0
+  }
+};
+
+var PRAYERS = [
+  { key: 'Fajr',    ar: 'الفجر',  en: 'Fajr' },
+  { key: 'Sunrise', ar: 'الشروق', en: 'Sunrise', notPrayer: true },
+  { key: 'Dhuhr',   ar: 'الظهر',  en: 'Dhuhr' },
+  { key: 'Asr',     ar: 'العصر',  en: 'Asr' },
+  { key: 'Maghrib', ar: 'المغرب', en: 'Maghrib' },
+  { key: 'Isha',    ar: 'العشاء', en: 'Isha' }
+];
+
+var state = { dayKey: null, timings: null, tomorrowFajr: null, lastFired: null, retryAt: 0 };
+
+function pad(n) { return (n < 10 ? '0' : '') + n; }
+function $(id) { return document.getElementById(id); }
+
+// The TV's clock is assumed to be set to Berlin time (it normally is, via network time).
+function dayKeyOf(d) { return pad(d.getDate()) + '-' + pad(d.getMonth() + 1) + '-' + d.getFullYear(); }
+
+function atTime(base, hhmm) {
+  var p = hhmm.split(':');
+  var d = new Date(base.getFullYear(), base.getMonth(), base.getDate(), +p[0], +p[1], 0, 0);
+  return d;
+}
+
+function apiUrl(dayKey) {
+  return 'https://api.aladhan.com/v1/timings/' + dayKey +
+    '?latitude=' + CONFIG.latitude + '&longitude=' + CONFIG.longitude +
+    '&method=' + CONFIG.method + '&timezonestring=' + encodeURIComponent(CONFIG.timezone);
+}
+
+function getJSON(url, cb) {
+  var cacheKey = 'pt:' + url;
+  try {
+    var cached = localStorage.getItem(cacheKey);
+    if (cached) { cb(null, JSON.parse(cached)); return; }
+  } catch (e) {}
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', url);
+  xhr.timeout = 15000;
+  xhr.onload = function () {
+    if (xhr.status !== 200) { cb(new Error('HTTP ' + xhr.status)); return; }
+    try {
+      var data = JSON.parse(xhr.responseText).data;
+      try { localStorage.setItem(cacheKey, JSON.stringify(data)); } catch (e) {}
+      cb(null, data);
+    } catch (e) { cb(e); }
+  };
+  xhr.onerror = xhr.ontimeout = function () { cb(new Error('network')); };
+  xhr.send();
+}
+
+function loadDay(now) {
+  var key = dayKeyOf(now);
+  var tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  state.dayKey = key;
+  $('status').textContent = 'Loading…';
+  getJSON(apiUrl(key), function (err, data) {
+    if (err) {
+      $('status').innerHTML = '<span class="error">Could not load times (' + err.message + '), retrying…</span>';
+      state.dayKey = null;
+      state.retryAt = Date.now() + 60000;   // retry in a minute, not every tick
+      return;
+    }
+    state.timings = data.timings;
+    var h = data.date.hijri;
+    $('hijri').textContent = h.day + ' ' + h.month.ar + ' ' + h.year + ' هـ';
+    $('method').textContent = data.meta.method.name;
+    $('status').textContent = 'Updated ' + pad(now.getHours()) + ':' + pad(now.getMinutes());
+    renderGrid();
+    getJSON(apiUrl(dayKeyOf(tomorrow)), function (e2, d2) {
+      if (!e2) state.tomorrowFajr = atTime(tomorrow, d2.timings.Fajr);
+    });
+  });
+}
+
+function renderGrid() {
+  var html = '';
+  for (var i = 0; i < PRAYERS.length; i++) {
+    var p = PRAYERS[i];
+    html += '<div class="card' + (p.notPrayer ? ' sunrise' : '') + '" id="card-' + p.key + '">' +
+      '<div class="ar">' + p.ar + '</div>' +
+      '<div class="en">' + p.en + '</div>' +
+      '<div class="time">' + state.timings[p.key].substr(0, 5) + '</div></div>';
+  }
+  $('grid').innerHTML = html;
+}
+
+// ---- Azan -------------------------------------------------------------------
+// TV browsers block sound until the remote has been pressed once. The first key
+// press "unlocks" audio; if the Azan is due while still locked, an overlay asks
+// for a press and the Azan starts on it.
+var azan = { audio: null, unlocked: false, pending: null };
+
+function azanAudio() {
+  if (!azan.audio) {
+    azan.audio = new Audio();
+    azan.audio.preload = 'auto';
+    azan.audio.onended = hideAzanOverlay;
+  }
+  return azan.audio;
+}
+
+function playAzan(prayer) {
+  var a = azanAudio();
+  var src = prayer.key === 'Fajr' ? CONFIG.azan.fajrUrl : CONFIG.azan.url;
+  if (a.src !== src) a.src = src;
+  a.volume = CONFIG.azan.volume;
+  a.currentTime = 0;
+  showAzanOverlay(prayer, false);
+  var result = a.play();
+  if (result && result.catch) {
+    result.catch(function () {
+      azan.pending = prayer;           // blocked: wait for a key press
+      azan.unlocked = false;
+      showAzanOverlay(prayer, true);
+    });
+  }
+}
+
+function stopAzan() {
+  if (azan.audio) azan.audio.pause();
+  azan.pending = null;
+  hideAzanOverlay();
+}
+
+function showAzanOverlay(prayer, needsPress) {
+  $('azanName').textContent = prayer.ar + '  ·  ' + prayer.en;
+  $('azanHint').textContent = needsPress ? 'Press OK on the remote to play the Azan' : 'Press OK to stop';
+  $('azanOverlay').style.display = 'flex';
+}
+
+function hideAzanOverlay() { $('azanOverlay').style.display = 'none'; }
+
+function updateAzanStatus() {
+  if (!CONFIG.azan.enabled) { $('azanStatus').textContent = 'Azan off'; return; }
+  $('azanStatus').textContent = azan.unlocked ? 'Azan on' : 'Press any button on the remote to enable the Azan';
+}
+
+document.addEventListener('keydown', function () {
+  if (azan.pending) {                  // Azan was blocked: play it now
+    var p = azan.pending;
+    azan.pending = null;
+    azan.unlocked = true;
+    playAzan(p);
+  } else if (azan.audio && !azan.audio.paused) {
+    stopAzan();                        // any key stops a playing Azan
+  } else if (!azan.unlocked) {
+    tryUnlockAudio();
+  }
+  updateAzanStatus();
+});
+
+// Play muted and immediately pause: succeeds if the browser allows sound.
+// Some TVs (like this LG) allow it without any key press.
+function tryUnlockAudio() {
+  var a = azanAudio();
+  a.src = CONFIG.azan.url;
+  a.muted = true;
+  var r = a.play();
+  var done = function () { a.pause(); a.muted = false; a.currentTime = 0; azan.unlocked = true; updateAzanStatus(); };
+  if (r && r.then) r.then(done, function () { a.muted = false; }); else done();
+}
+
+// Called once when a prayer time arrives.
+function onPrayerTime(prayer) {
+  if (CONFIG.azan.enabled && !prayer.notPrayer) playAzan(prayer);
+}
+
+function tick() {
+  var now = new Date();
+  $('clock').innerHTML = pad(now.getHours()) + ':' + pad(now.getMinutes()) +
+    '<span class="sec">:' + pad(now.getSeconds()) + '</span>';
+  $('greg').textContent = now.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+  if (state.dayKey !== dayKeyOf(now) && !(state.retryAt > now.getTime())) { state.timings = null; loadDay(now); }
+  if (!state.timings) return;
+
+  var next = null, current = null;
+  for (var i = 0; i < PRAYERS.length; i++) {
+    var p = PRAYERS[i];
+    var t = atTime(now, state.timings[p.key]);
+    var card = $('card-' + p.key);
+    if (t <= now) {
+      if (!p.notPrayer) current = p;
+      card.className = card.className.replace(' passed', '') + ' passed';
+    } else if (!next && !p.notPrayer) {
+      next = { prayer: p, at: t };
+    }
+  }
+  // Highlight the prayer whose time we are currently in.
+  for (var j = 0; j < PRAYERS.length; j++) {
+    var c = $('card-' + PRAYERS[j].key);
+    var isActive = current && PRAYERS[j].key === current.key;
+    c.className = c.className.replace(' active', '') + (isActive ? ' active' : '');
+    if (isActive) c.className = c.className.replace(' passed', '');
+  }
+
+  if (current) {
+    var startedAt = atTime(now, state.timings[current.key]);
+    var firedKey = state.dayKey + current.key;
+    if (now - startedAt < 60000 && state.lastFired !== firedKey) {
+      state.lastFired = firedKey;
+      onPrayerTime(current);
+    }
+  }
+
+  if (!next && state.tomorrowFajr) next = { prayer: PRAYERS[0], at: state.tomorrowFajr };
+  if (next) {
+    var s = Math.max(0, Math.floor((next.at - now) / 1000));
+    $('nextName').textContent = next.prayer.en + '  ·  ' + next.prayer.ar;
+    $('nextCount').textContent = pad(Math.floor(s / 3600)) + ':' + pad(Math.floor(s / 60) % 60) + ':' + pad(s % 60);
+  }
+}
+
+tick();
+setInterval(tick, 1000);
+updateAzanStatus();
+if (CONFIG.azan.enabled) tryUnlockAudio();
+
+// Open index.html?test=azan to hear the Azan 10 seconds after the page loads.
+if (/[?&]test=azan/.test(location.search)) {
+  setTimeout(function () { onPrayerTime(PRAYERS[2]); }, 10000);
+}
+</script>
+</body>
+</html>
